@@ -1,0 +1,128 @@
+#cloud-config
+---
+write_files:
+  # Kubeconfig file. 
+  - path: /etc/kubernetes/worker-kubeconfig.yaml
+    owner: root
+    permissions: 0755
+    content: |
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - name: local
+        cluster:
+          server: http://172.18.18.101:8080
+      users:
+      - name: kubelet
+      contexts:
+      - context:
+          cluster: local
+          user: kubelet
+        name: kubelet-context
+      current-context: kubelet-context
+
+hostname: flannel-03
+coreos:
+  etcd2:
+    proxy: on 
+    listen-client-urls: http://localhost:2379
+    initial-cluster: etcdserver=http://172.18.18.101:2380
+  fleet:
+    metadata: "role=node"
+    etcd_servers: "http://localhost:2379"
+  update:
+    reboot-strategy: off
+  units:
+    - name: etcd2.service
+      command: start
+    - name: fleet.service
+      command: start
+    - name: flannel.service
+      command: start
+      content: |
+        [Unit]
+        Requires=etcd2.service
+        After=etcd2.service
+        Before=docker.service
+        [Service]
+        Type=notify
+        ExecStart=/opt/bin/flanneld \
+        -iface=eth1 \
+        -ip-masq=true
+        ExecStartPost=/opt/bin/mk-docker-opts.sh  -d /run/flannel_docker_opts.env -i
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: docker.service
+      drop-ins:
+        - name: "50-flanneld.conf"
+          content: |
+            [Unit]
+            Requires=flannel.service
+            After=flannel.service
+            [Service]
+            Environment=DOCKER_OPTS='--insecure-registry="192.168.46.21:5000"'
+            ExecStartPre=/opt/bin/mk-docker-opts.sh -d /run/flannel_docker_opts.env -i 
+
+    - name: setup-network-environment.service
+      command: start
+      content: |
+        [Unit]
+        Description=Setup Network Environment
+        Documentation=https://github.com/kelseyhightower/setup-network-environment
+        Requires=network-online.target
+        After=network-online.target
+        [Service]
+        ExecStartPre=-/usr/bin/chmod +x /opt/bin/setup-network-environment
+        ExecStart=/opt/bin/setup-network-environment
+        RemainAfterExit=yes
+        Type=oneshot
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: kubelet.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Kubelet
+        Documentation=https://github.com/kubernetes/kubernetes
+        After=docker.service
+        Requires=docker.service
+
+        [Service]
+        ExecStart=/opt/bin/kubelet \
+        --address=0.0.0.0 \
+        --allow-privileged=true \
+        --cluster-dns=10.100.0.10 \
+        --cluster-domain=cluster.local \
+        --config=/opt/kubernetes/manifests \
+        --hostname-override=$private_ipv4 \
+        --api-servers=http://172.18.18.101:8080 \
+        --pod-infra-container-image="192.168.46.21:5000/kubernetes/pause:latest" \
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: kube-proxy.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Proxy
+        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Requires=kubelet.service
+        After=kubelet.service
+        [Service]
+        ExecStart=/opt/bin/kube-proxy \
+        --master=http://172.18.18.101:8080 \
+        --proxy-mode=iptables \
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
+
